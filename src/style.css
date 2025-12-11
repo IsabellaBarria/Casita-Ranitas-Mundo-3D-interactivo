@@ -17,3 +17,56 @@ body
     left: 0;
     outline: none;
 }
+
+.day-night-btn
+{
+    position: fixed;
+    top: 20px;
+    left: 20px;
+    padding: 12px 24px;
+    font-size: 16px;
+    font-weight: bold;
+    background: rgba(255, 255, 255, 0.9);
+    border: 2px solid #333;
+    border-radius: 25px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    z-index: 100;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+}
+
+.day-night-btn:hover
+{
+    background: rgba(255, 255, 255, 1);
+    transform: scale(1.05);
+}
+
+.day-night-btn:active
+{
+    transform: scale(0.95);
+}
+
+.heart-emote
+{
+    position: fixed;
+    font-size: 48px;
+    pointer-events: none;
+    z-index: 1000;
+    animation: heartFloat 1.5s ease-out forwards;
+}
+
+@keyframes heartFloat
+{
+    0% {
+        transform: translateY(0) scale(0.5);
+        opacity: 1;
+    }
+    50% {
+        transform: translateY(-30px) scale(1.2);
+        opacity: 1;
+    }
+    100% {
+        transform: translateY(-80px) scale(0.8);
+        opacity: 0;
+    }
+}
