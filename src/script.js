@@ -1,10 +1,6 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
-import * as dat from 'lil-gui'
-
-const gui = new dat.GUI()
-gui.close()
 
 const canvas = document.querySelector('canvas.webgl')
 const scene = new THREE.Scene()
@@ -23,6 +19,7 @@ const textureLoader = new THREE.TextureLoader()
 let frogMale = null
 let frogFemale = null
 const clickableObjects = []
+let houseObject = null
 
 // Posición aproximada de la chimenea (ajusta estos valores si no coincide)
 const chimneyPosition = new THREE.Vector3(0.1, 0.7, -0.1)
@@ -95,6 +92,8 @@ gltfLoader.load(
     // Ajustar posición y escala si es necesario
     modelo.position.set(0, 0, 0)
     modelo.scale.set(1, 1, 1)
+    // Lista temporal para detectar ranas por tamaño y material
+    const frogCandidates = []
     
     // Habilitar sombras y buscar personajes
     modelo.traverse((child) => {
@@ -102,18 +101,82 @@ gltfLoader.load(
         child.castShadow = true
         child.receiveShadow = true
         
-        // Buscar ranas por nombre de material
-        if (child.material && child.material.name) {
-          if (child.material.name === 'Material.001') {
-            frogMale = frogMale || child
-            clickableObjects.push(child)
-          } else if (child.material.name.includes('tripo_node')) {
-            frogFemale = frogFemale || child
-            clickableObjects.push(child)
+        // Detectar por nombre de mesh únicamente
+          const meshName = (child.name || '').toLowerCase()
+          // Calcular tamaño del mesh para evitar objetos grandes como la casa
+          let radius = 0
+          if (child.geometry) {
+            if (!child.geometry.boundingSphere) child.geometry.computeBoundingSphere()
+            if (child.geometry.boundingSphere) radius = child.geometry.boundingSphere.radius
           }
-        }
+
+          // Candidatos por nombre; tamaño relajado para no excluir
+          const isHouseByName = meshName === 'casita'
+          if (isHouseByName && !houseObject) {
+            houseObject = child
+          }
+          const isMaleByName = meshName === 'ranito'
+          const isFemaleByName = meshName === 'ranita'
+          const isReasonableSize = radius > 0 && radius < 2.0
+
+          if (!isHouseByName && (isMaleByName || isFemaleByName) && (isReasonableSize || radius === 0)) {
+            frogCandidates.push({ mesh: child, radius, name: child.name || '(sin nombre)' })
+          }
       }
     })
+
+      // Ordenar por tamaño (más pequeño primero) y elegir hasta 2 ranas
+      frogCandidates.sort((a, b) => a.radius - b.radius)
+      console.table(frogCandidates.map(c => ({ name: c.name, mat: c.matName, radius: (c.radius||0).toFixed?.(3) || c.radius })))
+      // Reset targets to avoid stale house entries
+      clickableObjects.length = 0
+      let picked = frogCandidates.slice(0, 2).map(c => c.mesh)
+      // Si no hay candidatos, hacer fallback por material sin filtrar por tamaño
+      if (picked.length === 0) {
+        const fallback = []
+        modelo.traverse((child) => {
+          if (child.isMesh) {
+            const n = (child.name || '').toLowerCase()
+            if (n === 'ranito' || n === 'ranita') {
+              fallback.push(child)
+            }
+          }
+        })
+        picked = fallback.slice(0, 2)
+      }
+      // Asignar referencias y registrar como clickeables
+      picked.forEach((mesh) => {
+        const n = (mesh.name || '').toLowerCase()
+        if (!frogMale && n === 'ranito') frogMale = mesh
+        else if (!frogFemale && n === 'ranita') frogFemale = mesh
+        // Guardar posición inicial para resetear en modo día
+        mesh.userData.initialPosition = mesh.position.clone()
+        mesh.userData.initialY = mesh.position.y
+        mesh.userData.entering = false
+        clickableObjects.push(mesh)
+        console.log('✅ Clickable frog mesh:', { name: mesh.name })
+      })
+
+      // Si ya estamos en modo NOCHE cuando termina de cargar, iniciar movimiento
+      if (!isDay) {
+        const startEnter = (frog) => {
+          if (!frog) return
+          frog.userData.entering = true
+          frog.userData.phase = 'hop'
+          frog.userData.hopStart = clock.getElapsedTime()
+          frog.userData.hopDuration = 0.6
+          frog.userData.walkStart = null
+          frog.userData.walkDuration = 2.0
+          frog.userData.speed = 0.8
+          frog.userData.baseY = frog.position.y
+          const dir = new THREE.Vector3()
+          frog.getWorldDirection(dir)
+          frog.userData.slideDir = dir.multiplyScalar(-1).normalize()
+        }
+        console.log('🌙 Noche activa al cargar, iniciando movimiento de ranitas...')
+        startEnter(frogMale)
+        startEnter(frogFemale)
+      }
     
     scene.add(modelo)
   },
@@ -259,6 +322,21 @@ dayNightBtn.addEventListener('click', () => {
     
     // Ocultar luciérnagas de día
     fireflies.forEach(firefly => firefly.visible = false)
+    // Deslizar ranas hacia afuera en modo día
+    ;[frogMale, frogFemale].forEach(f => {
+      if (f) {
+        f.visible = true
+        if (f.userData.initialPosition) {
+          console.log('☀️ Iniciando regreso de', f.name, 'desde', f.position.x.toFixed(2), 'hacia inicial', f.userData.initialPosition.x.toFixed(2))
+          f.userData.entering = true
+          f.userData.phase = 'slideOut'
+          f.userData.baseY = f.position.y
+        } else {
+          f.userData.entering = false
+          f.userData.phase = null
+        }
+      }
+    })
     
     dayNightBtn.textContent = '🌙 Noche'
   } else {
@@ -277,6 +355,31 @@ dayNightBtn.addEventListener('click', () => {
     
     // Mostrar luciérnagas de noche
     fireflies.forEach(firefly => firefly.visible = true)
+    // Noche: salto leve y caminar hacia el centro/casa
+    const startEnter = (frog) => {
+      if (!frog) {
+        console.log('⚠️ No se encontró rana para animar')
+        return
+      }
+      console.log('🌙 Iniciando animación nocturna para', frog.name, 'desde posición:', frog.position.x.toFixed(2), frog.position.z.toFixed(2))
+      frog.userData.entering = true
+      frog.userData.phase = 'hop'
+      frog.userData.hopStart = clock.getElapsedTime()
+      frog.userData.hopDuration = 0.6
+      frog.userData.walkStart = null
+      frog.userData.walkDuration = 1.8  // Aumentado para ir más lejos
+      frog.userData.speed = 0.4  // Velocidad aumentada
+      frog.userData.baseY = frog.position.y
+      // Dirección hacia el centro (casa está cerca del 0,0,0)
+      const dir = new THREE.Vector3(0, 0, 0).sub(frog.position)
+      dir.y = 0  // Solo movimiento horizontal
+      dir.normalize()
+      frog.userData.slideDir = dir
+      console.log('🐸 Dirección hacia casa:', dir.x.toFixed(3), dir.z.toFixed(3))
+    }
+    console.log('🐸 Ranas disponibles - Macho:', frogMale?.name, 'Hembra:', frogFemale?.name)
+    startEnter(frogMale)
+    startEnter(frogFemale)
     
     dayNightBtn.textContent = '☀️ Día'
   }
@@ -337,10 +440,14 @@ window.addEventListener('click', (event) => {
   
   // Detectar intersecciones
   const intersects = raycaster.intersectObjects(clickableObjects, false)
-  
-  if (intersects.length > 0) {
-    const clickedObject = intersects[0].object
-    console.log('💕 Rana clickeada!')
+  // Filter to frogs by material to avoid house
+  const frogHit = intersects.find(i => {
+    const n = (i.object.name || '').toLowerCase()
+    return n === 'ranito' || n === 'ranita'
+  })
+  if (frogHit) {
+    const clickedObject = frogHit.object
+    console.log('💕 Rana clickeada!', { name: clickedObject.name, mat: clickedObject.material?.name })
     showHeartEmote(clickedObject)
   }
 })
@@ -392,6 +499,7 @@ const tick = () => {
   
   controls.update()
   waterNormal.offset.y += 0.002  // Anima las ondas del charco
+  const delta = clock.getDelta()
   
   // Actualizar humo de la chimenea
   for (let i = 0; i < smokeCount; i++) {
@@ -429,6 +537,74 @@ const tick = () => {
       firefly.material.emissiveIntensity = 1.5 + Math.sin(elapsedTime * 5 + firefly.position.x * 100) * 0.5
     })
   }
+  
+  // Animación de las ranas (día y noche)
+  const updateEntering = (frog) => {
+    if (!frog || !frog.userData.entering) return
+    const phase = frog.userData.phase
+    if (phase === 'hop') {
+      const t = Math.min(1, (elapsedTime - frog.userData.hopStart) / frog.userData.hopDuration)
+      const yOffset = Math.sin(t * Math.PI) * 0.15
+      frog.position.y = frog.userData.baseY + yOffset
+      if (t >= 1) {
+        frog.userData.phase = 'walkBack'
+        frog.userData.walkStart = elapsedTime
+        frog.position.y = frog.userData.baseY
+        console.log('🐸 Empezando walkBack para', frog.name)
+      }
+    } else if (phase === 'walkBack') {
+      // Caminar hacia el centro/casa en XZ con dirección fija
+      const dir = frog.userData.slideDir || new THREE.Vector3(0,0,-1)
+      // Usar un delta fijo mínimo si getDelta da 0
+      const safeDelta = Math.max(delta, 0.016)
+      const movement = frog.userData.speed * safeDelta
+      const oldX = frog.position.x
+      const oldZ = frog.position.z
+      frog.position.addScaledVector(dir, movement)
+      // Log constante durante el movimiento
+      const elapsed = elapsedTime - frog.userData.walkStart
+      if (elapsed < 0.5 || Math.random() < 0.05) {
+        console.log('🐸', frog.name, 'pos:', frog.position.x.toFixed(3), frog.position.z.toFixed(3), 
+                    'movimiento:', (frog.position.x - oldX).toFixed(4), (frog.position.z - oldZ).toFixed(4),
+                    'delta:', safeDelta.toFixed(3))
+      }
+      // Detener tras la duración indicada
+      if (elapsed > frog.userData.walkDuration) {
+        console.log('🐸 Terminando walkBack para', frog.name, '- pos final:', frog.position.x.toFixed(2), frog.position.z.toFixed(2))
+        frog.userData.entering = false
+        frog.userData.phase = null
+      }
+    } else if (phase === 'slideOut') {
+      // Deslizar de vuelta a la posición inicial
+      const target = frog.userData.initialPosition
+      if (target) {
+        const toTarget = new THREE.Vector3().subVectors(target, frog.position)
+        toTarget.y = 0
+        const dist = toTarget.length()
+        if (dist > 0.02) {
+          toTarget.normalize()
+          const safeDelta = Math.max(delta, 0.016)
+          frog.position.addScaledVector(toTarget, 0.5 * safeDelta)
+          // Log ocasional
+          if (Math.random() < 0.02) {
+            console.log('☀️', frog.name, 'regresando - dist:', dist.toFixed(3), 'pos:', frog.position.x.toFixed(3), frog.position.z.toFixed(3))
+          }
+        } else {
+          frog.position.x = target.x
+          frog.position.z = target.z
+          frog.position.y = frog.userData.baseY
+          frog.userData.entering = false
+          frog.userData.phase = null
+          console.log('☀️ Regresó a posición inicial:', frog.name)
+        }
+      } else {
+        frog.userData.entering = false
+        frog.userData.phase = null
+      }
+    }
+  }
+  updateEntering(frogMale)
+  updateEntering(frogFemale)
   
   renderer.render(scene, camera)
   window.requestAnimationFrame(tick)
